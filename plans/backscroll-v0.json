@@ -1,0 +1,640 @@
+{
+  "title": "Backscroll (bsc) — v0",
+  "branch": "feat/backscroll-v0",
+  "mode": "EXPANSION",
+  "overview": "Backscroll is a local-only time machine for the terminal: it records every shell command (text, output, cwd, exit code, timestamp, duration, git branch) into a searchable SQLite+FTS5 store so you can later find past commands — including their OUTPUT, which is what makes 'the one that worked' answerable. v0 ships scaffold+CI, storage layer, PTY recording (bsc rec) plus a zsh hook (bsc init zsh), filtered search, bsc show, an interactive fuzzy picker that copies to clipboard, and first-class privacy (redaction, exclude config, pause). 100% local, no network.",
+  "scopeChallenge": "Greenfield repo (only .claude/ exists), Node v22.12, fzf NOT installed. Phase 0 locked four decisions with the user: (1) capture = PTY-wrapped subshell that auto-injects a shell integration emitting OSC 133 markers carrying metadata, with heuristic prompt detection only as fallback — chosen over hooks-only (drops the headline output feature) and pure heuristics (fragile across prompt themes); (2) EXPANSION mode (nothing to reuse); (3) custom Node TUI picker (fzf absent, zero external dep); (4) zsh-only for v0 (bash/fish deferred). Explicit non-goals to avoid over-building: no daemon, sync, web UI, encryption-at-rest, stats, replay/asciinema export, bash/fish, or config UI.",
+  "existingCodeLeverage": [
+    { "subProblem": "Storage, capture, CLI, UI — all application code", "existingCode": "(none — greenfield)", "action": "build" },
+    { "subProblem": "PTY subshell spawn", "existingCode": "node-pty", "action": "reuse" },
+    { "subProblem": "Full-text search engine", "existingCode": "better-sqlite3 + FTS5", "action": "reuse" },
+    { "subProblem": "CLI parsing and terminal colors", "existingCode": "commander / picocolors", "action": "reuse" }
+  ],
+  "failureModes": [
+    { "risk": "OSC 133 markers split across PTY read chunks cause dropped or garbled segmentation", "affectedTasks": ["TASK-011", "TASK-012", "TASK-015"], "mitigation": "Buffer partial escape sequences in the parser across feed() calls; explicit boundary test in TASK-030." },
+    { "risk": "Prompt themes (powerlevel10k, transient/right prompts) defeat the heuristic fallback", "affectedTasks": ["TASK-012"], "mitigation": "Markers are the primary, deterministic path; heuristic is only a non-fatal safety net and is allowed to be degraded." },
+    { "risk": "Native deps (node-pty, better-sqlite3) fail to build on macOS/Linux/CI", "affectedTasks": ["TASK-001", "TASK-015", "TASK-027"], "mitigation": "Pin known-good versions; CI matrix builds them on both OSes so breakage is loud, not silent." },
+    { "risk": "Secrets leak into storage before redaction runs", "affectedTasks": ["TASK-009", "TASK-033"], "mitigation": "Redaction runs in the persist pipeline before insertCommand, default-on; unit-tested against captured insert args (TASK-033); DB dir is 0700 and gitignored." },
+    { "risk": "Unbounded output (yes, cat bigfile, tail -f) OOMs the recorder or bloats the DB", "affectedTasks": ["TASK-012", "TASK-015"], "mitigation": "Per-command maxOutputBytes cap (default 1 MB) truncates with a marker and stops buffering (explicit AC in TASK-012)." },
+    { "risk": "Synchronous SQLite write + redaction regex on the PTY thread janks the interactive shell", "affectedTasks": ["TASK-009", "TASK-015", "TASK-033"], "mitigation": "better-sqlite3 is synchronous; the output cap bounds redaction/write cost, persist runs only at commandEnd (not per chunk), and WAL keeps writes fast. Full async write queue deferred to v1." },
+    { "risk": "PTY teardown leaves the user's terminal stuck in raw mode", "affectedTasks": ["TASK-015", "TASK-024"], "mitigation": "Always restore termios in finally/exit handlers, including SIGINT and error paths." },
+    { "risk": "FTS index drifts out of sync with commands/output rows", "affectedTasks": ["TASK-008"], "mitigation": "Single transaction writes commands+output+search_fts together; store-managed rather than multi-table triggers; round-trip test in TASK-031." },
+    { "risk": "search.ts edited by two tasks causes a conflict", "affectedTasks": ["TASK-022", "TASK-025"], "mitigation": "TASK-025 depends on TASK-022 so the shared file is written sequentially." },
+    { "risk": "Over-redaction destroys useful history (false positives)", "affectedTasks": ["TASK-009"], "mitigation": "Negative test cases for benign text; conservative key-name matching; visible «redacted:KIND» markers." }
+  ],
+  "testCoverageMap": [
+    { "codepath": "Secret masking on the write path", "coveringTask": "TASK-029", "testType": "unit" },
+    { "codepath": "Pause/exclude privacy gate", "coveringTask": "TASK-032", "testType": "unit" },
+    { "codepath": "Persist pipeline: redaction-before-write + drop-when-paused/excluded", "coveringTask": "TASK-033", "testType": "unit" },
+    { "codepath": "OSC 133 marker parsing including split chunks", "coveringTask": "TASK-030", "testType": "unit" },
+    { "codepath": "Stream to per-command segmentation plus heuristic fallback", "coveringTask": "TASK-030", "testType": "unit" },
+    { "codepath": "Output cap / truncation marker", "coveringTask": "TASK-030", "testType": "unit" },
+    { "codepath": "Insert and FTS search round-trip", "coveringTask": "TASK-031", "testType": "integration" },
+    { "codepath": "Search filters cwd/success/since/until/limit", "coveringTask": "TASK-031", "testType": "integration" },
+    { "codepath": "Schema load and migrate idempotency", "coveringTask": "TASK-007", "testType": "integration" },
+    { "codepath": "ANSI stripping", "coveringTask": "TASK-010", "testType": "unit" },
+    { "codepath": "Config defaults and malformed-file tolerance", "coveringTask": "TASK-006", "testType": "unit" },
+    { "codepath": "zsh snippet emits OSC 133 markers", "coveringTask": "TASK-013", "testType": "integration" },
+    { "codepath": "bsc rec end-to-end capture", "coveringTask": "TASK-020", "testType": "e2e" },
+    { "codepath": "CLI help/version/unknown-command handling", "coveringTask": "TASK-026", "testType": "unit" }
+  ],
+  "tasks": [
+    {
+      "id": "TASK-001",
+      "title": "Project scaffold & TypeScript config",
+      "description": "Create package.json with bin { bsc: dist/cli.js }, deps (node-pty, better-sqlite3, commander, picocolors), devDeps (typescript, jest, ts-jest, @types/jest, @types/node, @types/better-sqlite3, eslint, typescript-eslint, prettier), and scripts (build, dev, test, lint, format). Add tsconfig.json (strict, NodeNext, outDir dist) and .gitignore (node_modules, dist, *.sqlite*).",
+      "type": "infra",
+      "effort": "S",
+      "priority": "P0",
+      "dependsOn": [],
+      "acceptanceCriteria": [
+        "npm install succeeds and npx tsc --noEmit runs with zero config errors on an empty src/",
+        "tsconfig.json has strict:true and emits to dist/",
+        ".gitignore excludes node_modules/, dist/, and *.sqlite* so the DB is never committed"
+      ],
+      "filesToModify": [],
+      "filesToCreate": ["package.json", "tsconfig.json", ".gitignore"],
+      "agent": "nodejs-cli-senior-engineer"
+    },
+    {
+      "id": "TASK-002",
+      "title": "Lint / format / test tooling configs",
+      "description": "Create eslint.config.js (flat config, typescript-eslint recommended), .prettierrc.json, and jest.config.js (ts-jest preset, testEnvironment node, testMatch test/**/*.test.ts). Do not modify package.json.",
+      "type": "infra",
+      "effort": "S",
+      "priority": "P0",
+      "dependsOn": [],
+      "acceptanceCriteria": [
+        "npm run lint runs eslint over src/ with no config errors",
+        "npm test invokes jest and reports no-tests cleanly (exit 0 with --passWithNoTests)",
+        "Prettier and eslint do not conflict on a sample formatted file"
+      ],
+      "filesToModify": [],
+      "filesToCreate": ["eslint.config.js", ".prettierrc.json", "jest.config.js"],
+      "agent": "nodejs-cli-senior-engineer"
+    },
+    {
+      "id": "TASK-003",
+      "title": "Domain types & contracts",
+      "description": "Create src/types.ts exporting SessionRecord, CommandRecord (source: 'pty'|'hook'), OutputBlock, SearchFilters (cwd?, successOnly?, since?, until?, limit?, query), SearchResult (command + snippet + rank), BackscrollConfig (excludeCommands, excludeDirs, redactionExtraPatterns, redactionEnabled, maxOutputBytes), RedactionMatch.",
+      "type": "feature",
+      "effort": "S",
+      "priority": "P0",
+      "dependsOn": [],
+      "acceptanceCriteria": [
+        "All types compile under strict mode with no any in public shapes",
+        "CommandRecord.exitCode is number|null and source is the literal union",
+        "SearchFilters makes every filter optional except query"
+      ],
+      "filesToModify": [],
+      "filesToCreate": ["src/types.ts"],
+      "agent": "nodejs-cli-senior-engineer"
+    },
+    {
+      "id": "TASK-004",
+      "title": "SQLite schema (sessions · commands · output · FTS5)",
+      "description": "Create src/db/schema.sql: sessions; commands (+ indices on cwd, exit_code, started_at); output (1:1 with commands, ON DELETE CASCADE); contentless search_fts(command, output) with tokenize='porter unicode61'. WAL + foreign_keys pragmas applied by TASK-007.",
+      "type": "feature",
+      "effort": "S",
+      "priority": "P0",
+      "dependsOn": [],
+      "acceptanceCriteria": [
+        "Loading the schema into a fresh :memory: better-sqlite3 db succeeds with no SQL errors",
+        "commands.session_id and output.command_id both cascade on delete",
+        "An FTS MATCH query against search_fts returns rows after a manual insert"
+      ],
+      "filesToModify": [],
+      "filesToCreate": ["src/db/schema.sql"],
+      "agent": "nodejs-cli-senior-engineer"
+    },
+    {
+      "id": "TASK-005",
+      "title": "Data-dir & path resolution",
+      "description": "Create src/paths.ts: resolve data dir ($XDG_DATA_HOME/backscroll or ~/.local/share/backscroll, with $BACKSCROLL_DIR override); expose dbPath(), configPath(), pauseMarkerPath(), ensureDataDir(). Create dir with 0700 perms.",
+      "type": "feature",
+      "effort": "S",
+      "priority": "P1",
+      "dependsOn": ["TASK-003"],
+      "acceptanceCriteria": [
+        "ensureDataDir() creates the dir recursively and is idempotent on a second call",
+        "$BACKSCROLL_DIR overrides the default location",
+        "Created directory has owner-only (0700) permissions"
+      ],
+      "filesToModify": [],
+      "filesToCreate": ["src/paths.ts"],
+      "agent": "nodejs-cli-senior-engineer"
+    },
+    {
+      "id": "TASK-006",
+      "title": "Config loader",
+      "description": "Create src/config.ts: load JSON config from configPath(), deep-merge over defaults (redactionEnabled:true, empty exclude lists, empty extra patterns, maxOutputBytes:1000000), return typed BackscrollConfig. Tolerate missing/malformed file (warn, never throw).",
+      "type": "feature",
+      "effort": "S",
+      "priority": "P1",
+      "dependsOn": ["TASK-003", "TASK-005"],
+      "acceptanceCriteria": [
+        "Missing config file returns defaults without throwing",
+        "Malformed JSON logs a warning and returns defaults (does not crash recording)",
+        "User values override defaults; unspecified keys keep defaults"
+      ],
+      "filesToModify": [],
+      "filesToCreate": ["src/config.ts"],
+      "agent": "nodejs-cli-senior-engineer"
+    },
+    {
+      "id": "TASK-007",
+      "title": "Database open & migrate",
+      "description": "Create src/db/database.ts: open better-sqlite3 at dbPath(), apply schema.sql idempotently (guarded by IF NOT EXISTS), set WAL + foreign_keys pragmas, expose getDb() singleton and closeDb().",
+      "type": "feature",
+      "effort": "M",
+      "priority": "P1",
+      "dependsOn": ["TASK-004", "TASK-005"],
+      "acceptanceCriteria": [
+        "First open creates all tables; second open is a no-op with no errors",
+        "PRAGMA foreign_keys reports 1 and journal_mode reports wal after open",
+        "Opening against a read-only directory surfaces a clear error"
+      ],
+      "filesToModify": [],
+      "filesToCreate": ["src/db/database.ts"],
+      "agent": "nodejs-cli-senior-engineer"
+    },
+    {
+      "id": "TASK-008",
+      "title": "Store API",
+      "description": "Create src/db/store.ts: createSession(), endSession(id), insertCommand(record) writing commands+output+search_fts in one transaction, search(filters):SearchResult[] (FTS MATCH + cwd/exit/time filters + limit, ordered by rank), getCommandById(id), getRecentCommands(limit). Prepared statements.",
+      "type": "feature",
+      "effort": "L",
+      "priority": "P1",
+      "dependsOn": ["TASK-003", "TASK-007"],
+      "acceptanceCriteria": [
+        "insertCommand then search finds the row by a term in its output",
+        "search with successOnly excludes non-zero exits; cwd is a prefix match; limit caps results",
+        "A command with no output (hook source) leaves output row absent but stays searchable by command text"
+      ],
+      "filesToModify": [],
+      "filesToCreate": ["src/db/store.ts"],
+      "agent": "nodejs-cli-senior-engineer"
+    },
+    {
+      "id": "TASK-009",
+      "title": "Redaction engine (privacy — pre-storage)",
+      "description": "Create src/redaction/redact.ts: redact(text, config):string implementing layered patterns (secret-key assignments KEY=value, known token shapes AWS/GitHub/Slack/JWT/PEM, generic long hex/base64, plus config extra patterns). Export rule list for testing. Replace with «redacted:KIND».",
+      "type": "feature",
+      "effort": "M",
+      "priority": "P1",
+      "dependsOn": ["TASK-003"],
+      "acceptanceCriteria": [
+        "AWS_SECRET_ACCESS_KEY=..., a ghp_ token, and a Bearer eyJ... JWT are all masked",
+        "Benign strings like PATH=/usr/bin and ordinary prose are left untouched",
+        "Config extra patterns apply; redactionEnabled:false returns text verbatim"
+      ],
+      "filesToModify": [],
+      "filesToCreate": ["src/redaction/redact.ts"],
+      "agent": "nodejs-cli-senior-engineer"
+    },
+    {
+      "id": "TASK-010",
+      "title": "ANSI utilities",
+      "description": "Create src/capture/ansi.ts: stripAnsi(s) removing CSI/SGR/OSC and other escape sequences, returning clean text for storage and search.",
+      "type": "feature",
+      "effort": "S",
+      "priority": "P1",
+      "dependsOn": [],
+      "acceptanceCriteria": [
+        "Colored output (\\x1b[31mred\\x1b[0m) reduces to red",
+        "Cursor-movement and clear-line sequences are removed without eating surrounding text",
+        "Input with no escapes is returned unchanged"
+      ],
+      "filesToModify": [],
+      "filesToCreate": ["src/capture/ansi.ts"],
+      "agent": "nodejs-cli-senior-engineer"
+    },
+    {
+      "id": "TASK-011",
+      "title": "OSC 133 marker parser",
+      "description": "Create src/capture/osc133.ts: state machine scanning a stream for ESC ] 133 ; {A|B|C|D} [;params] ST/BEL emitting typed events (promptStart, commandStart{cmd,cwd,branch}, commandEnd{exitCode,durationMs}). Decode base64 params. Tolerate markers split across chunk boundaries.",
+      "type": "feature",
+      "effort": "M",
+      "priority": "P1",
+      "dependsOn": [],
+      "acceptanceCriteria": [
+        "A full 133;C;cmd=<b64>... then 133;D;0;dur=12 sequence emits commandStart + commandEnd with decoded fields",
+        "A marker split across two feed() calls is still parsed correctly",
+        "Non-133 OSC sequences and malformed params are ignored without throwing"
+      ],
+      "filesToModify": [],
+      "filesToCreate": ["src/capture/osc133.ts"],
+      "agent": "nodejs-cli-senior-engineer"
+    },
+    {
+      "id": "TASK-012",
+      "title": "Output segmenter (+ heuristic fallback)",
+      "description": "Create src/capture/segmenter.ts: consume PTY stream via the OSC 133 parser, accumulate bytes between commandStart and commandEnd as a command's output, emit OutputBlocks. Enforce a configurable output cap (maxOutputBytes): once a command's output exceeds the cap, stop buffering and append a …[truncated N bytes] marker to bound memory against runaway commands (yes, cat bigfile, tail -f). Fallback: detect prompt redraws when no markers. Strip ANSI from stored output.",
+      "type": "feature",
+      "effort": "L",
+      "priority": "P1",
+      "dependsOn": ["TASK-003", "TASK-010", "TASK-011"],
+      "acceptanceCriteria": [
+        "A scripted two-command marker stream yields exactly two OutputBlocks with correct command/exit/output",
+        "Output between markers is captured then ANSI-stripped and assigned to the right command",
+        "Output exceeding maxOutputBytes is truncated with a …[truncated N bytes] marker and buffering stops (no unbounded memory growth)",
+        "A marker-less stream still produces >=1 block via heuristic fallback rather than crashing or losing everything"
+      ],
+      "filesToModify": [],
+      "filesToCreate": ["src/capture/segmenter.ts"],
+      "agent": "nodejs-cli-senior-engineer"
+    },
+    {
+      "id": "TASK-013",
+      "title": "zsh integration snippet (generator + template)",
+      "description": "Create src/shell/zsh-integration.zsh (preexec/precmd emitting OSC 133 A/C/D with base64 cmd/cwd/branch payloads) and src/shell/integration.ts exporting zshSnippet({forRec}) returning it as a string. forRec variant is auto-sourced inside bsc rec; install variant is printed by bsc init zsh.",
+      "type": "feature",
+      "effort": "M",
+      "priority": "P1",
+      "dependsOn": ["TASK-003"],
+      "acceptanceCriteria": [
+        "Sourcing the snippet in real zsh and running a command emits a 133;C and 133;D pair (verify via cat -v)",
+        "The snippet computes git branch without erroring outside a git repo (empty branch, no stderr noise)",
+        "integration.ts returns valid zsh for both forRec:true and forRec:false"
+      ],
+      "filesToModify": [],
+      "filesToCreate": ["src/shell/zsh-integration.zsh", "src/shell/integration.ts"],
+      "agent": "nodejs-cli-senior-engineer"
+    },
+    {
+      "id": "TASK-014",
+      "title": "Recording gate — pause & exclude (privacy)",
+      "description": "Create src/capture/recording-gate.ts: isPaused() (presence of pauseMarkerPath()), setPaused(bool), shouldRecord(command, cwd, config) returning false on exclude-pattern match (glob/substring for commands and dirs).",
+      "type": "feature",
+      "effort": "M",
+      "priority": "P1",
+      "dependsOn": ["TASK-005", "TASK-006"],
+      "acceptanceCriteria": [
+        "With the pause marker present, isPaused() is true and nothing is recorded",
+        "A command matching excludeCommands and a cwd under excludeDirs are both rejected by shouldRecord",
+        "Empty exclude lists allow everything (default behavior)"
+      ],
+      "filesToModify": [],
+      "filesToCreate": ["src/capture/recording-gate.ts"],
+      "agent": "nodejs-cli-senior-engineer"
+    },
+    {
+      "id": "TASK-015",
+      "title": "PTY recorder — terminal mechanics (make-or-break node)",
+      "description": "Create src/capture/pty-recorder.ts: spawn $SHELL via node-pty with a temp ZDOTDIR rcfile sourcing the forRec integration; pipe child<->parent stdio transparently; tee output into the segmenter; handle SIGWINCH resize and clean teardown (always restore termios). Hand each OutputBlock to the persist pipeline (TASK-033) — this task owns terminal mechanics, not the storage/privacy decision. Return child exit code.",
+      "type": "feature",
+      "effort": "L",
+      "priority": "P1",
+      "dependsOn": ["TASK-012", "TASK-013", "TASK-033"],
+      "acceptanceCriteria": [
+        "bsc rec gives a fully interactive shell; typing/colors/resize behave like a normal terminal",
+        "Each command's OutputBlock is forwarded to the persist pipeline with correct command/exit/output",
+        "Terminal raw mode is always restored on exit, including on child crash or parent SIGINT (no broken terminal)"
+      ],
+      "filesToModify": [],
+      "filesToCreate": ["src/capture/pty-recorder.ts"],
+      "agent": "nodejs-cli-senior-engineer"
+    },
+    {
+      "id": "TASK-016",
+      "title": "Time parsing & humanize utils",
+      "description": "Create src/util/time.ts: parseSince(s)/parseUntil(s) accepting relative (3w, 2d, 1mo, 45m) and ISO dates -> epoch ms; humanizeRelative(ms) and humanizeDuration(ms). Inject 'now' for testability.",
+      "type": "feature",
+      "effort": "S",
+      "priority": "P1",
+      "dependsOn": [],
+      "acceptanceCriteria": [
+        "3w resolves to ~21 days before a passed-in reference time (no hidden Date.now())",
+        "An ISO string parses to the correct epoch ms",
+        "An unparseable token throws a clear error surfaced to the user"
+      ],
+      "filesToModify": [],
+      "filesToCreate": ["src/util/time.ts"],
+      "agent": "nodejs-cli-senior-engineer"
+    },
+    {
+      "id": "TASK-017",
+      "title": "Clipboard utility",
+      "description": "Create src/ui/clipboard.ts: copyToClipboard(text) using pbcopy (darwin), wl-copy/xclip/xsel (linux); detect availability and fail gracefully with a message if none found. Pass text via stdin, never shell-interpolated.",
+      "type": "feature",
+      "effort": "S",
+      "priority": "P1",
+      "dependsOn": [],
+      "acceptanceCriteria": [
+        "On macOS, copied text is retrievable via pbpaste",
+        "When no clipboard tool is present, returns a handled failure and tells the user (no unhandled throw)",
+        "Text with newlines/quotes is copied without corruption (stdin, not shell interpolation)"
+      ],
+      "filesToModify": [],
+      "filesToCreate": ["src/ui/clipboard.ts"],
+      "agent": "nodejs-cli-senior-engineer"
+    },
+    {
+      "id": "TASK-018",
+      "title": "Result formatting & match highlighting",
+      "description": "Create src/ui/format.ts: render SearchResult[] as aligned rows (id, ✓/✗ glyph, relative time, cwd, command) with picocolors, highlighting matched query terms in command + a one-line output snippet. Respect NO_COLOR and non-TTY.",
+      "type": "feature",
+      "effort": "M",
+      "priority": "P1",
+      "dependsOn": ["TASK-003", "TASK-016"],
+      "acceptanceCriteria": [
+        "Matched substrings are highlighted; exit 0 shows ✓ and non-zero shows ✗",
+        "NO_COLOR=1 (or non-TTY) disables color codes entirely",
+        "Very long commands/cwd are truncated to terminal width without breaking column alignment"
+      ],
+      "filesToModify": [],
+      "filesToCreate": ["src/ui/format.ts"],
+      "agent": "nodejs-cli-senior-engineer"
+    },
+    {
+      "id": "TASK-019",
+      "title": "bsc init zsh command",
+      "description": "Create src/commands/init.ts: print the install-variant zsh snippet (TASK-013) to stdout with a one-line comment instructing the user to add eval \"$(bsc init zsh)\" to .zshrc. Error on unsupported shell arg.",
+      "type": "feature",
+      "effort": "S",
+      "priority": "P1",
+      "dependsOn": ["TASK-013"],
+      "acceptanceCriteria": [
+        "bsc init zsh prints valid sourceable zsh to stdout (nothing else on stdout)",
+        "bsc init bash exits non-zero with 'only zsh supported in v0'",
+        "Output is pure shell (no color codes) so eval \"$(bsc init zsh)\" works"
+      ],
+      "filesToModify": [],
+      "filesToCreate": ["src/commands/init.ts"],
+      "agent": "nodejs-cli-senior-engineer"
+    },
+    {
+      "id": "TASK-020",
+      "title": "bsc rec command",
+      "description": "Create src/commands/rec.ts: create a session in the store, invoke the PTY recorder, end the session on exit, print a 'recording -> <db>' banner to stderr at start. Exit with the child shell's exit code. Refuse nested rec.",
+      "type": "feature",
+      "effort": "M",
+      "priority": "P1",
+      "dependsOn": ["TASK-008", "TASK-015"],
+      "acceptanceCriteria": [
+        "bsc rec opens a subshell; exiting returns control and sets ended_at on the session row",
+        "The startup banner goes to stderr, not stdout",
+        "Nested bsc rec inside an existing rec session is detected and refused with a clear message"
+      ],
+      "filesToModify": [],
+      "filesToCreate": ["src/commands/rec.ts"],
+      "agent": "nodejs-cli-senior-engineer"
+    },
+    {
+      "id": "TASK-021",
+      "title": "bsc pause / resume / status command",
+      "description": "Create src/commands/pause.ts: pause creates the pause marker, resume removes it, status prints whether recording is paused plus the data-dir/db location.",
+      "type": "feature",
+      "effort": "S",
+      "priority": "P1",
+      "dependsOn": ["TASK-005", "TASK-014"],
+      "acceptanceCriteria": [
+        "bsc pause then bsc status reports paused; bsc resume then bsc status reports active",
+        "resume when not paused is a no-op (no error)",
+        "status prints the resolved DB path so users can verify where data lives"
+      ],
+      "filesToModify": [],
+      "filesToCreate": ["src/commands/pause.ts"],
+      "agent": "nodejs-cli-senior-engineer"
+    },
+    {
+      "id": "TASK-022",
+      "title": "bsc search command (non-interactive)",
+      "description": "Create src/commands/search.ts: parse <query> + --cwd --success --since --until --limit, build SearchFilters (parse times via TASK-016), call store.search, print via format. Non-interactive path; picker layered in TASK-025.",
+      "type": "feature",
+      "effort": "M",
+      "priority": "P1",
+      "dependsOn": ["TASK-008", "TASK-016", "TASK-018"],
+      "acceptanceCriteria": [
+        "bsc search docker --success --limit 5 returns <=5 exit-0 results matching docker",
+        "--since 3w filters out older rows; --cwd restricts by directory prefix",
+        "Empty result prints a friendly 'no matches' (exit 0); invalid --since errors clearly"
+      ],
+      "filesToModify": [],
+      "filesToCreate": ["src/commands/search.ts"],
+      "agent": "nodejs-cli-senior-engineer"
+    },
+    {
+      "id": "TASK-023",
+      "title": "bsc show <id> command",
+      "description": "Create src/commands/show.ts: fetch command + output by id, print a metadata header (command, cwd, branch, exit, time, duration) then the full stored (redacted) output. Error if id not found.",
+      "type": "feature",
+      "effort": "S",
+      "priority": "P1",
+      "dependsOn": ["TASK-008", "TASK-018"],
+      "acceptanceCriteria": [
+        "bsc show <id> prints the full output block for that command",
+        "A non-existent id exits non-zero with 'command #<id> not found'",
+        "A hook-sourced command with no output prints the header + '(no output captured)' without crashing"
+      ],
+      "filesToModify": [],
+      "filesToCreate": ["src/commands/show.ts"],
+      "agent": "nodejs-cli-senior-engineer"
+    },
+    {
+      "id": "TASK-024",
+      "title": "Interactive TUI fuzzy picker",
+      "description": "Create src/ui/picker.ts: raw-mode keypress loop over a result set — type to fuzzy-narrow, up/down to move, an output-preview pane for the highlighted row (getCommandById), Enter copies the selected command to clipboard (TASK-017) and exits, esc/Ctrl-C quits. Restore terminal state on exit.",
+      "type": "feature",
+      "effort": "L",
+      "priority": "P2",
+      "dependsOn": ["TASK-008", "TASK-017", "TASK-018"],
+      "acceptanceCriteria": [
+        "Arrow keys move selection and the preview pane updates to the highlighted command's output",
+        "Enter copies the highlighted command and exits cleanly; esc exits without copying",
+        "Terminal raw mode is always restored on exit, including Ctrl-C / error (no broken terminal)"
+      ],
+      "filesToModify": [],
+      "filesToCreate": ["src/ui/picker.ts"],
+      "agent": "nodejs-cli-senior-engineer"
+    },
+    {
+      "id": "TASK-025",
+      "title": "Wire picker into bsc search",
+      "description": "Modify src/commands/search.ts: when stdout is a TTY and --no-pick is absent, route results into the picker (TASK-024); otherwise keep the plain list. Add the --no-pick flag.",
+      "type": "feature",
+      "effort": "S",
+      "priority": "P2",
+      "dependsOn": ["TASK-022", "TASK-024"],
+      "acceptanceCriteria": [
+        "Interactive TTY run opens the picker; --no-pick or a piped/non-TTY run prints the plain list",
+        "An empty result set does not open an empty picker (prints 'no matches')",
+        "The copied command is reported to the user after the picker exits"
+      ],
+      "filesToModify": ["src/commands/search.ts"],
+      "filesToCreate": [],
+      "agent": "nodejs-cli-senior-engineer"
+    },
+    {
+      "id": "TASK-026",
+      "title": "CLI entry & command registration",
+      "description": "Create src/cli.ts: #!/usr/bin/env node commander program named bsc, register init/rec/search/show/pause/resume/status; global try/catch printing clean errors with proper exit codes; --version/--help.",
+      "type": "feature",
+      "effort": "M",
+      "priority": "P2",
+      "dependsOn": ["TASK-019", "TASK-020", "TASK-021", "TASK-022", "TASK-023"],
+      "acceptanceCriteria": [
+        "bsc --help lists all subcommands; bsc --version prints the package version",
+        "An unknown subcommand exits non-zero with a helpful message",
+        "Thrown errors produce a single clean stderr line + non-zero exit (no raw stack dump by default)"
+      ],
+      "filesToModify": [],
+      "filesToCreate": ["src/cli.ts"],
+      "agent": "nodejs-cli-senior-engineer"
+    },
+    {
+      "id": "TASK-027",
+      "title": "CI workflow",
+      "description": "Create .github/workflows/ci.yml: matrix {macos-latest, ubuntu-latest} x node {20,22}; steps checkout, setup-node, npm ci, npm run build, npm run lint, npm test. Cache npm.",
+      "type": "infra",
+      "effort": "S",
+      "priority": "P3",
+      "dependsOn": ["TASK-001", "TASK-002"],
+      "acceptanceCriteria": [
+        "Workflow YAML is valid and triggers on push + PR",
+        "Matrix covers macOS and Linux on node 20 and 22",
+        "Native deps (node-pty, better-sqlite3) build in CI or the job fails loudly"
+      ],
+      "filesToModify": [],
+      "filesToCreate": [".github/workflows/ci.yml"],
+      "agent": "general-purpose"
+    },
+    {
+      "id": "TASK-028",
+      "title": "README",
+      "description": "Create README.md: pitch, ASCII architecture diagram, quickstart (npm i -g, bsc init zsh, bsc rec, bsc search), prominent Privacy section (local-only, redaction, exclude/pause), and a short 'How this differs from atuin' note — key point: Backscroll records command OUTPUT so 'the one that worked' is answerable.",
+      "type": "docs",
+      "effort": "M",
+      "priority": "P3",
+      "dependsOn": ["TASK-026"],
+      "acceptanceCriteria": [
+        "Quickstart commands match the actual implemented CLI surface (init/rec/search/show/pause)",
+        "Privacy section states 100% local, no network and documents redaction + exclude + pause",
+        "The atuin comparison explicitly names output-capture as the differentiator"
+      ],
+      "filesToModify": [],
+      "filesToCreate": ["README.md"],
+      "agent": "general-purpose"
+    },
+    {
+      "id": "TASK-029",
+      "title": "Redaction tests",
+      "description": "Create test/redaction.test.ts: positive masking (AWS/GitHub/JWT/PEM/KEY=value), negative cases (no over-redaction of benign text), config extra patterns + disable toggle.",
+      "type": "test",
+      "effort": "S",
+      "priority": "P2",
+      "dependsOn": ["TASK-009"],
+      "acceptanceCriteria": [
+        "All documented secret shapes are masked; benign strings are untouched",
+        "An extra config pattern masks a custom token",
+        "redactionEnabled:false returns input verbatim"
+      ],
+      "filesToModify": [],
+      "filesToCreate": ["test/redaction.test.ts"],
+      "agent": "nodejs-cli-senior-engineer"
+    },
+    {
+      "id": "TASK-030",
+      "title": "Capture tests (OSC 133 + segmenter)",
+      "description": "Create test/osc133.test.ts and test/segmenter.test.ts: feed scripted byte streams (incl. chunk-split markers and a marker-less fallback stream) and assert correct events/blocks.",
+      "type": "test",
+      "effort": "M",
+      "priority": "P2",
+      "dependsOn": ["TASK-011", "TASK-012"],
+      "acceptanceCriteria": [
+        "Two-command marker stream produces two correct OutputBlocks",
+        "A marker split across two feeds parses correctly",
+        "A marker-less stream produces output via heuristic fallback (no crash, no total loss)"
+      ],
+      "filesToModify": [],
+      "filesToCreate": ["test/osc133.test.ts", "test/segmenter.test.ts"],
+      "agent": "nodejs-cli-senior-engineer"
+    },
+    {
+      "id": "TASK-031",
+      "title": "Store / search / FTS tests",
+      "description": "Create test/store.test.ts: against an in-memory db, assert insert->FTS search round-trips and each filter (cwd, successOnly, since/until, limit) behaves correctly.",
+      "type": "test",
+      "effort": "M",
+      "priority": "P2",
+      "dependsOn": ["TASK-008", "TASK-022"],
+      "acceptanceCriteria": [
+        "Insert then search by an output term returns the row",
+        "successOnly excludes non-zero exits; cwd prefix filter and limit work",
+        "since/until window excludes out-of-range rows"
+      ],
+      "filesToModify": [],
+      "filesToCreate": ["test/store.test.ts"],
+      "agent": "nodejs-cli-senior-engineer"
+    },
+    {
+      "id": "TASK-032",
+      "title": "Recording-gate tests (privacy control)",
+      "description": "Create test/recording-gate.test.ts: cover pause/exclude privacy controls — pause marker honored, exclude-command and exclude-dir patterns reject, empty exclude lists allow everything.",
+      "type": "test",
+      "effort": "S",
+      "priority": "P2",
+      "dependsOn": ["TASK-014"],
+      "acceptanceCriteria": [
+        "With the pause marker present isPaused() is true; absent, false",
+        "A command matching excludeCommands and a cwd under excludeDirs are both rejected by shouldRecord",
+        "Empty exclude lists allow all commands (default-permissive)"
+      ],
+      "filesToModify": [],
+      "filesToCreate": ["test/recording-gate.test.ts"],
+      "agent": "nodejs-cli-senior-engineer"
+    },
+    {
+      "id": "TASK-033",
+      "title": "Persist pipeline (gate -> redact -> insert)",
+      "description": "Create src/capture/persist.ts and test/persist.test.ts. persist.ts exports a function taking an OutputBlock + config that (1) checks isPaused() and shouldRecord() (TASK-014), dropping the record if either rejects; (2) runs redact() (TASK-009) on command AND output; (3) calls insertCommand (TASK-008). Isolates the storage/privacy decision from PTY mechanics so the redaction-before-write guarantee is unit-testable without spawning a shell.",
+      "type": "feature",
+      "effort": "M",
+      "priority": "P1",
+      "dependsOn": ["TASK-008", "TASK-009", "TASK-014"],
+      "acceptanceCriteria": [
+        "A normal block is redacted (command + output) and inserted exactly once",
+        "When paused or when shouldRecord rejects, nothing is inserted (verified against a fake/in-memory store)",
+        "Redaction runs before insertCommand so a secret-bearing block never reaches the store unmasked (asserted on captured insert args)"
+      ],
+      "filesToModify": [],
+      "filesToCreate": ["src/capture/persist.ts", "test/persist.test.ts"],
+      "agent": "nodejs-cli-senior-engineer"
+    }
+  ],
+  "dependencies": {
+    "TASK-001": [],
+    "TASK-002": [],
+    "TASK-003": [],
+    "TASK-004": [],
+    "TASK-005": ["TASK-003"],
+    "TASK-006": ["TASK-003", "TASK-005"],
+    "TASK-007": ["TASK-004", "TASK-005"],
+    "TASK-008": ["TASK-003", "TASK-007"],
+    "TASK-009": ["TASK-003"],
+    "TASK-010": [],
+    "TASK-011": [],
+    "TASK-012": ["TASK-003", "TASK-010", "TASK-011"],
+    "TASK-013": ["TASK-003"],
+    "TASK-014": ["TASK-005", "TASK-006"],
+    "TASK-015": ["TASK-012", "TASK-013", "TASK-033"],
+    "TASK-016": [],
+    "TASK-017": [],
+    "TASK-018": ["TASK-003", "TASK-016"],
+    "TASK-019": ["TASK-013"],
+    "TASK-020": ["TASK-008", "TASK-015"],
+    "TASK-021": ["TASK-005", "TASK-014"],
+    "TASK-022": ["TASK-008", "TASK-016", "TASK-018"],
+    "TASK-023": ["TASK-008", "TASK-018"],
+    "TASK-024": ["TASK-008", "TASK-017", "TASK-018"],
+    "TASK-025": ["TASK-022", "TASK-024"],
+    "TASK-026": ["TASK-019", "TASK-020", "TASK-021", "TASK-022", "TASK-023"],
+    "TASK-027": ["TASK-001", "TASK-002"],
+    "TASK-028": ["TASK-026"],
+    "TASK-029": ["TASK-009"],
+    "TASK-030": ["TASK-011", "TASK-012"],
+    "TASK-031": ["TASK-008", "TASK-022"],
+    "TASK-032": ["TASK-014"],
+    "TASK-033": ["TASK-008", "TASK-009", "TASK-014"]
+  }
+}

@@ -1,0 +1,14 @@
+node_modules/
+dist/
+*.tsbuildinfo
+
+# Local data store — must never be committed
+*.sqlite
+*.sqlite-*
+*.db
+.backscroll/
+
+# OS / editor
+.DS_Store
+*.log
+coverage/
