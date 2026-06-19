@@ -5,13 +5,13 @@
  */
 import { zshSnippet, SUPPORTED_SHELLS } from '../shell/integration';
 
-export function initCommand(shell: string): number {
+export function initCommand(shell: string, autoRecord = false): number {
   if (shell !== 'zsh') {
     process.stderr.write(
       `bsc: only zsh is supported in v0 (got "${shell}"). Supported shells: ${SUPPORTED_SHELLS.join(', ')}\n`
     );
     return 1;
   }
-  process.stdout.write(`${zshSnippet()}\n`);
+  process.stdout.write(`${zshSnippet({ autoRecord })}\n`);
   return 0;
 }

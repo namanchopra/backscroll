@@ -14,6 +14,8 @@ import { searchCommand, SearchOptions } from './commands/search';
 import { showCommand } from './commands/show';
 import { pauseCommand, resumeCommand, statusCommand } from './commands/pause';
 import { captureHookCommand, CaptureHookOptions } from './commands/capture-hook';
+import { importCommand, ImportOptions } from './commands/import';
+import { uiCommand, UiOptions } from './commands/ui';
 import { closeDb } from './db/database';
 
 function fail(err: unknown): void {
@@ -35,9 +37,10 @@ async function main(): Promise<void> {
   program
     .command('init')
     .argument('<shell>', 'shell to generate integration for (zsh)')
+    .option('--auto-record', 'auto-wrap every interactive shell in a recording session (captures output everywhere)')
     .description('print shell integration to add to your rc file')
-    .action((shell: string) => {
-      process.exitCode = initCommand(shell);
+    .action((shell: string, opts: { autoRecord?: boolean }) => {
+      process.exitCode = initCommand(shell, Boolean(opts.autoRecord));
     });
 
   program
@@ -67,6 +70,25 @@ async function main(): Promise<void> {
     .description('print the full output of a past command')
     .action((id: string) => {
       process.exitCode = showCommand(id);
+    });
+
+  program
+    .command('import')
+    .description('backfill existing shell history (~/.zsh_history, ~/.bash_history)')
+    .option('--zsh', 'import zsh history only')
+    .option('--bash', 'import bash history only')
+    .option('--file <path>', 'import a specific history file')
+    .action((opts: ImportOptions) => {
+      process.exitCode = importCommand(opts);
+    });
+
+  program
+    .command('ui')
+    .description('open the web UI to browse history in your browser (local-only)')
+    .option('--no-open', 'do not open a browser automatically')
+    .option('--port <n>', 'port to listen on (default: an OS-assigned port)')
+    .action(async (opts: UiOptions) => {
+      process.exitCode = await uiCommand(opts);
     });
 
   program.command('pause').description('pause recording').action(() => {

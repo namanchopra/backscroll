@@ -1,17 +1,26 @@
+/* eslint-disable no-control-regex -- matching ESC/BEL control bytes is the whole point here */
 /**
  * ANSI escape-sequence stripping. [TASK-010]
  *
- * Stored and searchable output is plain text — we drop colour/cursor/OSC
- * control sequences before persisting. The pattern is the well-known
- * `ansi-regex` (sindresorhus) covering CSI/SGR plus OSC strings.
+ * Stored and searchable output is plain text — we drop colour/cursor control
+ * sequences AND OSC strings (e.g. the OSC 7 "current directory" and OSC 0/2
+ * title reports many shells emit, which would otherwise leak `file://host/...`
+ * noise into captured output).
  */
 
-const ANSI_PATTERN = [
-  '[\\u001B\\u009B][[\\]()#;?]*(?:(?:(?:(?:;[-a-zA-Z\\d/#&.:=?%@~_]+)*|[a-zA-Z\\d]+(?:;[-a-zA-Z\\d/#&.:=?%@~_]*)*)?\\u0007)',
-  '(?:(?:\\d{1,4}(?:;\\d{0,4})*)?[\\dA-PR-TZcf-nq-uy=><~]))',
-].join('|');
+// OSC: ESC ] ... terminated by BEL (\x07) or ST (ESC \). Non-greedy.
+const OSC = /\x1b\][\s\S]*?(?:\x07|\x1b\\)/g;
+// CSI: ESC [ params intermediates final-byte (covers SGR colour, cursor moves).
+const CSI = /\x1b\[[0-?]*[ -/]*[@-~]/g;
+// Other two-byte escapes (ESC + a single command byte) and stray ESC/CSI bytes.
+const ESC_SEQ = /\x1b[@-Z\\-_]/g;
+const STRAY = /[\x1b\x9b]/g;
 
-/** Remove ANSI escape sequences (colour, cursor, OSC) from a string. */
+/** Remove ANSI/OSC escape sequences from a string. */
 export function stripAnsi(input: string): string {
-  return input.replace(new RegExp(ANSI_PATTERN, 'g'), '');
+  return input
+    .replace(OSC, '')
+    .replace(CSI, '')
+    .replace(ESC_SEQ, '')
+    .replace(STRAY, '');
 }

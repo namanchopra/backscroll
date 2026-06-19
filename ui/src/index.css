@@ -1,0 +1,16 @@
+@import "tailwindcss";
+
+:root {
+  color-scheme: dark;
+}
+
+body {
+  margin: 0;
+  background: #0b0e14;
+  color: #d6deeb;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+#root {
+  height: 100vh;
+}

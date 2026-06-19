@@ -54,14 +54,30 @@ add-zsh-hook preexec __bsc_preexec
 add-zsh-hook precmd __bsc_precmd
 `;
 
+// Opt-in: transparently wrap every interactive shell in a recording session so
+// command OUTPUT is captured with no manual `bsc rec`. Guarded so it only fires
+// in interactive shells, never re-enters (BACKSCROLL_REC), can be disabled per
+// session (BACKSCROLL_NO_AUTO), and falls back to a normal shell if bsc is
+// missing or fails to start.
+const AUTO_RECORD = `# Backscroll auto-record: wrap interactive shells in a recording session.
+if [[ -o interactive && -z "$BACKSCROLL_REC" && -z "$BACKSCROLL_NO_AUTO" ]] && command -v bsc >/dev/null 2>&1; then
+  bsc rec && exit
+fi
+`;
+
 export interface SnippetOptions {
   /** Reserved for future divergence between rec-injected and installed forms. */
   forRec?: boolean;
+  /** Prepend the auto-record wrapper (always-on output capture). */
+  autoRecord?: boolean;
 }
 
 /** Return the zsh integration snippet as a sourceable string. */
-export function zshSnippet(_opts: SnippetOptions = {}): string {
-  return ZSH_INTEGRATION;
+export function zshSnippet(opts: SnippetOptions = {}): string {
+  // Never auto-record inside the rec subshell itself (it sets BACKSCROLL_REC,
+  // so the guard would skip anyway — but omit it for clarity/safety).
+  const head = opts.autoRecord && !opts.forRec ? `${AUTO_RECORD}\n` : '';
+  return head + ZSH_INTEGRATION;
 }
 
 /** Shells supported by `bsc init` in v0. */

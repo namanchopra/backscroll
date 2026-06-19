@@ -112,6 +112,19 @@ On a TTY this opens an interactive fuzzy picker (↑↓ to move, type to filter,
 bsc show 1421
 ```
 
+Prefer a richer view? Launch the **local web UI** — a searchable browser app over your whole history:
+
+```sh
+bsc ui                 # serves a local-only UI, prints a tokenized URL, and opens your browser
+bsc ui --no-open       # start the server but don't launch a browser
+```
+
+It shows a virtualized list (handles tens of thousands of commands), search-as-you-type with filters, and a scrollable output pane. To re-run a command from the UI, click **Re-run**, then quit `bsc ui` — the chosen command is printed to stdout so it runs in *your* shell (the server never executes anything itself):
+
+```sh
+eval "$(bsc ui)"       # after picking "Re-run" and quitting, that command runs here
+```
+
 > `bsc rec` only works under **zsh** in v0. The integration the picker, hooks, and segmenter rely on is currently zsh-only.
 
 ---
@@ -124,6 +137,8 @@ bsc show 1421
 | `bsc rec` | Launch a PTY-wrapped recording shell that captures commands + output. Exit the shell to stop. |
 | `bsc search [query] [flags]` | Full-text search over commands **and** output. Opens an interactive picker on a TTY; prints a plain list when piped or with `--no-pick`. |
 | `bsc show <id>` | Print the full stored (redacted) output of a past command, with a metadata header. |
+| `bsc ui [flags]` | Open a local-only web UI (React SPA) to browse/search history in your browser. `--no-open` skips launching a browser; `--port <n>` fixes the port. |
+| `bsc import [flags]` | Backfill existing shell history (`~/.zsh_history`, `~/.bash_history`) as searchable commands. Idempotent; metadata-only (no output). |
 | `bsc pause` | Pause recording (no commands are stored until you resume). |
 | `bsc resume` | Resume recording. |
 | `bsc status` | Show paused/active state plus the resolved data dir and DB path. |
@@ -156,6 +171,7 @@ Privacy is a first-class feature, not a footnote.
 - **Pause whenever you want.** `bsc pause` stops all recording (a marker file); `bsc resume` re-enables it. `bsc status` tells you which state you're in.
 - **The data directory is owner-only.** It's created with `0700` permissions (no group/other read) and your `.gitignore` already excludes `*.sqlite*` so the database can never be committed.
 - **Output is capped per command.** `maxOutputBytes` (default 1 MB) bounds how much output any single command can store, so a runaway `yes` or `tail -f` can't bloat the DB — overflow is truncated with a `…[truncated N bytes]` marker.
+- **The web UI (`bsc ui`) is loopback-only and inert.** It binds `127.0.0.1` (never your LAN) on an OS-assigned port, gates **every** API request behind a one-time random token (generated per launch, embedded in the URL it prints), and serves the page under a strict `Content-Security-Policy: default-src 'self'` so it can make **no external requests**. The server **never executes commands** — "Re-run" only queues a command for *your* shell to run after you quit. The SPA ships pre-built; nothing is fetched from a CDN.
 
 ### Where data lives
 

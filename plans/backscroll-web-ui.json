@@ -1,0 +1,404 @@
+{
+  "title": "Backscroll Web UI (bsc ui)",
+  "branch": "feat/web-ui",
+  "mode": "EXPANSION",
+  "overview": "`bsc ui` launches a loopback-only HTTP server (127.0.0.1, OS-assigned port, one-time token) serving a React + Vite + Tailwind SPA for browsing recorded command history: virtualized 10k+ list, search-as-you-type, success/cwd/time filters, scrollable output pane. Read-only against the existing SQLite/FTS5 store. Scope is view + search + copy + re-run, where re-run executes nothing server-side — it queues the chosen command and `bsc ui` prints it on exit for `eval \"$(bsc ui)\"` in the user's own shell.",
+  "scopeChallenge": "Phase 0 locked: local web UI (over TUI / enhanced-picker), EXPANSION mode, scope view+search+copy+re-run. Security posture is the make-or-break for a web server on a 'no network ever' tool: bind 127.0.0.1 only (never 0.0.0.0); one-time crypto token required on all /api/*; strict CSP default-src 'self' so the SPA cannot make external requests; NO server-side process execution (re-run only queues intent, CLI prints on exit) so the loopback server is not an RCE surface; API serves only already-redacted stored data. React/Vite/Tailwind are devDependencies — the build emits static assets shipped in the package; runtime deps stay better-sqlite3/commander/node-pty/picocolors (server uses Node http/crypto, no Express). Ruled out: TUI, enhanced-picker, server-side re-run, any external asset.",
+  "existingCodeLeverage": [
+    { "subProblem": "Query history (search, by-id, recent)", "existingCode": "src/db/store.ts", "action": "extend" },
+    { "subProblem": "Filter and result shapes", "existingCode": "src/types.ts (SearchFilters, SearchResult, CommandRecord)", "action": "extend" },
+    { "subProblem": "Open the database", "existingCode": "src/db/database.ts (getDb)", "action": "reuse" },
+    { "subProblem": "Parse --since/--until query params", "existingCode": "src/util/time.ts (parseTimeSpec)", "action": "reuse" },
+    { "subProblem": "Redaction", "existingCode": "src/redaction/* (applied at write time)", "action": "reuse" },
+    { "subProblem": "CLI command registration", "existingCode": "src/cli.ts", "action": "extend" },
+    { "subProblem": "HTTP server framework", "existingCode": "(none — Node http)", "action": "build" },
+    { "subProblem": "Frontend SPA", "existingCode": "(none)", "action": "build" }
+  ],
+  "failureModes": [
+    { "risk": "Server binds 0.0.0.0, exposing history on the LAN", "affectedTasks": ["TASK-005"], "mitigation": "Explicit host '127.0.0.1'; integration test asserts loopback (TASK-018)." },
+    { "risk": "Missing/weak API auth lets other local users read history", "affectedTasks": ["TASK-004", "TASK-005"], "mitigation": "Random crypto token required on every /api/* request; 401 otherwise; test (TASK-018)." },
+    { "risk": "Server-side command execution becomes an RCE surface", "affectedTasks": ["TASK-004", "TASK-005", "TASK-006"], "mitigation": "Server never spawns a process; re-run only queues intent; the CLI prints the command on exit; tests assert no exec (TASK-017/018)." },
+    { "risk": "Missing CSP lets the SPA be coerced into external requests", "affectedTasks": ["TASK-003"], "mitigation": "Strict CSP default-src 'self' on every response; header asserted in TASK-018." },
+    { "risk": "SPA not shipped, so bsc ui 404s after global install", "affectedTasks": ["TASK-008", "TASK-006", "TASK-016"], "mitigation": "dist-ui in package files[]; build chains build:ui; ui command errors clearly if the dir is missing." },
+    { "risk": "10k+ rows blow up the DOM", "affectedTasks": ["TASK-013", "TASK-002"], "mitigation": "Virtualized list plus server-side offset pagination." },
+    { "risk": "1 MB output janks the browser", "affectedTasks": ["TASK-014"], "mitigation": "Fetch detail on demand; render output in a bounded scroll container." },
+    { "risk": "Chosen port already in use", "affectedTasks": ["TASK-005"], "mitigation": "Listen on port 0 (OS-assigned) and read the actual port back." },
+    { "risk": "Token leaks to an external site via referrer", "affectedTasks": ["TASK-003"], "mitigation": "Referrer-Policy: no-referrer plus CSP blocking external navigation." },
+    { "risk": "Frontend/contract DTO drift", "affectedTasks": ["TASK-001", "TASK-010"], "mitigation": "Mirror DTOs; a field rename in contract.ts breaks the FE build (caught by build:ui)." },
+    { "risk": "Redaction bypass via the API", "affectedTasks": ["TASK-004"], "mitigation": "API serves only stored, already-redacted data; no raw path exists." }
+  ],
+  "testCoverageMap": [
+    { "codepath": "store.search offset paging, countCommands, getStats", "coveringTask": "TASK-019", "testType": "unit" },
+    { "codepath": "API handlers: search params, pagination, 404, rerun-intent", "coveringTask": "TASK-017", "testType": "integration" },
+    { "codepath": "Loopback bind, token 401/200, CSP header, rerun no-exec", "coveringTask": "TASK-018", "testType": "integration" },
+    { "codepath": "Static serving + path-traversal rejection", "coveringTask": "TASK-018", "testType": "integration" },
+    { "codepath": "bsc ui launch, stderr URL, stdout rerun print", "coveringTask": "TASK-006", "testType": "e2e" },
+    { "codepath": "SPA builds clean with no external assets", "coveringTask": "TASK-009", "testType": "build" },
+    { "codepath": "Filter to query to list to detail interaction", "coveringTask": "TASK-015", "testType": "e2e" }
+  ],
+  "tasks": [
+    {
+      "id": "TASK-001",
+      "title": "API contract DTOs",
+      "description": "Create src/server/contract.ts with the JSON shapes shared by server and SPA: ApiSearchResponse {results: ApiResult[]; total; offset; limit}, ApiResult (id, command, cwd, gitBranch, exitCode, startedAt, durationMs, source, snippet), ApiCommandDetail (full CommandRecord incl. output), ApiStats {total; bySource; firstAt; lastAt}, RerunRequest {id}, RerunResponse {ok; command}. Pure types.",
+      "type": "feature",
+      "effort": "S",
+      "priority": "P0",
+      "dependsOn": [],
+      "acceptanceCriteria": [
+        "All DTOs compile under strict mode with no any",
+        "ApiSearchResponse includes total, offset, limit for pagination",
+        "Types are import-safe (no runtime side effects)"
+      ],
+      "filesToModify": [],
+      "filesToCreate": ["src/server/contract.ts"],
+      "agent": "nodejs-cli-senior-engineer"
+    },
+    {
+      "id": "TASK-002",
+      "title": "Store pagination, count, and stats",
+      "description": "Add offset?:number to SearchFilters in src/types.ts. In src/db/store.ts: honor offset in search() (LIMIT @limit OFFSET @offset); add countCommands(filters):number (same WHERE, SELECT count(*)); add getStats() returning {total, bySource, firstAt, lastAt}.",
+      "type": "feature",
+      "effort": "M",
+      "priority": "P0",
+      "dependsOn": [],
+      "acceptanceCriteria": [
+        "search({query, limit:10, offset:10}) returns rows 11-20, disjoint from offset 0",
+        "countCommands(filters) equals matching rows ignoring limit/offset",
+        "getStats() on an empty store returns total:0, firstAt:null, lastAt:null without throwing"
+      ],
+      "filesToModify": ["src/types.ts", "src/db/store.ts"],
+      "filesToCreate": [],
+      "agent": "nodejs-cli-senior-engineer"
+    },
+    {
+      "id": "TASK-003",
+      "title": "Static file server with strict CSP",
+      "description": "Create src/server/static.ts: serveStatic(req,res,rootDir) resolving a path to a file under rootDir (SPA fallback to index.html), correct Content-Type, and security headers on every response (CSP default-src 'self'; base-uri 'none'; frame-ancestors 'none'; X-Content-Type-Options: nosniff; Referrer-Policy: no-referrer). Reject path traversal.",
+      "type": "feature",
+      "effort": "M",
+      "priority": "P1",
+      "dependsOn": [],
+      "acceptanceCriteria": [
+        "/assets/app.js returns the file with correct Content-Type and the CSP header",
+        "An unknown non-API path returns index.html (SPA fallback)",
+        "A traversal attempt (/../../etc/passwd) is rejected with 403, never escaping rootDir"
+      ],
+      "filesToModify": [],
+      "filesToCreate": ["src/server/static.ts"],
+      "agent": "nodejs-cli-senior-engineer"
+    },
+    {
+      "id": "TASK-004",
+      "title": "API request handlers",
+      "description": "Create src/server/api.ts: handlers taking a Store and returning contract DTOs. handleSearch parses q/cwd/success/since/until/limit/offset (parseTimeSpec for times; clamp limit<=200), calls store.search + store.countCommands. handleCommand(id) returns detail or 404. handleStats. handleRerunIntent(id, queue) looks up the command, pushes to the queue, returns it — NEVER executes.",
+      "type": "feature",
+      "effort": "L",
+      "priority": "P1",
+      "dependsOn": ["TASK-001", "TASK-002"],
+      "acceptanceCriteria": [
+        "handleSearch with success=true&since=3w returns only exit-0 rows in the window plus a correct total",
+        "handleCommand returns full output for a valid id and 404 for a missing id",
+        "handleRerunIntent records the command and returns it, and never spawns a process",
+        "An invalid since (bare '3') yields a 400 with a clear message, not a crash"
+      ],
+      "filesToModify": [],
+      "filesToCreate": ["src/server/api.ts"],
+      "agent": "nodejs-cli-senior-engineer"
+    },
+    {
+      "id": "TASK-005",
+      "title": "Loopback HTTP server (token auth, routing, rerun queue)",
+      "description": "Create src/server/server.ts: startServer({store, staticDir}) returning {url, port, token, rerun:string[], close()}. Node http, listen on 127.0.0.1 port 0, crypto.randomBytes token. Route /api/* through a token gate (header or ?token=; 401 otherwise) to api.ts; everything else to static.ts. Hold the in-memory rerun queue. Never spawns a process.",
+      "type": "feature",
+      "effort": "L",
+      "priority": "P1",
+      "dependsOn": ["TASK-003", "TASK-004"],
+      "acceptanceCriteria": [
+        "Server binds 127.0.0.1 only (a LAN-IP connection is refused)",
+        "/api/stats without the token returns 401; with the correct token returns 200",
+        "close() releases the port (a subsequent startServer succeeds)"
+      ],
+      "filesToModify": [],
+      "filesToCreate": ["src/server/server.ts"],
+      "agent": "nodejs-cli-senior-engineer"
+    },
+    {
+      "id": "TASK-006",
+      "title": "bsc ui command",
+      "description": "Create src/commands/ui.ts: open the store (getDb), resolve the built SPA dir (dist-ui relative to the package), startServer, print the tokenized URL to stderr, open the browser (open/xdg-open/start via child_process, skippable), await SIGINT. On exit, if the rerun queue is non-empty, print the most recent queued command to stdout, then close().",
+      "type": "feature",
+      "effort": "M",
+      "priority": "P1",
+      "dependsOn": ["TASK-005"],
+      "acceptanceCriteria": [
+        "Prints a http://127.0.0.1:<port>/?token=... URL to stderr (not stdout)",
+        "On exit with a queued re-run, prints the chosen command to stdout (nothing else on stdout)",
+        "If the SPA build dir is missing, exits non-zero with a clear 'run npm run build' message"
+      ],
+      "filesToModify": [],
+      "filesToCreate": ["src/commands/ui.ts"],
+      "agent": "nodejs-cli-senior-engineer"
+    },
+    {
+      "id": "TASK-007",
+      "title": "Register ui in the CLI",
+      "description": "Modify src/cli.ts: register the ui command with options --no-open (don't launch a browser) and --port <n> (override the OS-assigned port). Wire to uiCommand.",
+      "type": "feature",
+      "effort": "S",
+      "priority": "P2",
+      "dependsOn": ["TASK-006"],
+      "acceptanceCriteria": [
+        "bsc --help lists ui",
+        "bsc ui --no-open starts the server without spawning a browser",
+        "--port with a non-numeric value errors cleanly via the existing error boundary"
+      ],
+      "filesToModify": ["src/cli.ts"],
+      "filesToCreate": [],
+      "agent": "nodejs-cli-senior-engineer"
+    },
+    {
+      "id": "TASK-008",
+      "title": "Frontend build tooling (Vite + Tailwind v4)",
+      "description": "Modify package.json: add devDependencies (react, react-dom, @types/react, @types/react-dom, vite, @vitejs/plugin-react, tailwindcss@4, @tailwindcss/vite, @tanstack/react-virtual) and scripts (dev:ui, build:ui); chain build:ui into the main build. Create ui/vite.config.ts (root:'ui', build.outDir:'../dist-ui', base:'./', plugins react + tailwind). No new runtime deps.",
+      "type": "infra",
+      "effort": "M",
+      "priority": "P0",
+      "dependsOn": [],
+      "acceptanceCriteria": [
+        "npm install succeeds and build:ui emits to dist-ui/",
+        "base:'./' so assets load with relative URLs under the served origin",
+        "The main npm run build runs both the tsc/server build and the SPA build"
+      ],
+      "filesToModify": ["package.json"],
+      "filesToCreate": ["ui/vite.config.ts"],
+      "agent": "react-vite-tailwind-engineer"
+    },
+    {
+      "id": "TASK-009",
+      "title": "SPA entry (index.html, main, styles)",
+      "description": "Create ui/index.html (root div + module script), ui/src/main.tsx (React root mounting App), ui/src/index.css (@import 'tailwindcss' + dark base). No external font/CDN links (CSP forbids them).",
+      "type": "feature",
+      "effort": "S",
+      "priority": "P1",
+      "dependsOn": ["TASK-008"],
+      "acceptanceCriteria": [
+        "build:ui produces index.html + hashed JS/CSS in dist-ui/",
+        "No link/script to any external origin (self-contained)",
+        "Mounts without console errors against a stubbed empty API"
+      ],
+      "filesToModify": [],
+      "filesToCreate": ["ui/index.html", "ui/src/main.tsx", "ui/src/index.css"],
+      "agent": "react-vite-tailwind-engineer"
+    },
+    {
+      "id": "TASK-010",
+      "title": "Frontend API client + mirrored types",
+      "description": "Create ui/src/api-types.ts (mirror of src/server/contract.ts, kept in sync manually) and ui/src/api.ts: a typed fetch client that reads the token from location.search, sends it on every request, and exposes search(filters)/getCommand(id)/getStats()/rerun(id). Surfaces 401/4xx as typed errors.",
+      "type": "feature",
+      "effort": "M",
+      "priority": "P1",
+      "dependsOn": ["TASK-001", "TASK-008"],
+      "acceptanceCriteria": [
+        "Every request includes the token from the URL",
+        "A 401 surfaces a distinct 'unauthorized' error the UI can show",
+        "Types match contract.ts (a field rename there is a compile break here)"
+      ],
+      "filesToModify": [],
+      "filesToCreate": ["ui/src/api-types.ts", "ui/src/api.ts"],
+      "agent": "react-vite-tailwind-engineer"
+    },
+    {
+      "id": "TASK-011",
+      "title": "Frontend formatting utilities",
+      "description": "Create ui/src/util/format.ts: relativeTime(ms, now), duration(ms), statusClass(exitCode). Browser-side, no Node imports, now injected.",
+      "type": "feature",
+      "effort": "S",
+      "priority": "P1",
+      "dependsOn": ["TASK-008"],
+      "acceptanceCriteria": [
+        "relativeTime returns 'just now' for <1min and 'Nw ago' for weeks",
+        "duration(null) returns a dash, not 'NaN'",
+        "Pure functions with now injected (no baked Date.now())"
+      ],
+      "filesToModify": [],
+      "filesToCreate": ["ui/src/util/format.ts"],
+      "agent": "react-vite-tailwind-engineer"
+    },
+    {
+      "id": "TASK-012",
+      "title": "SearchBar + filters component",
+      "description": "Create ui/src/components/SearchBar.tsx: debounced query input, success-only toggle, cwd filter, since/until inputs; emits a SearchFilters-shaped object via callback. Tailwind-styled, Esc clears.",
+      "type": "feature",
+      "effort": "M",
+      "priority": "P1",
+      "dependsOn": ["TASK-010"],
+      "acceptanceCriteria": [
+        "Typing debounces (<=1 callback per ~150ms burst)",
+        "Toggling success-only and editing cwd both propagate to the emitted filters",
+        "Empty query is allowed (browse-all), not blocked"
+      ],
+      "filesToModify": [],
+      "filesToCreate": ["ui/src/components/SearchBar.tsx"],
+      "agent": "react-vite-tailwind-engineer"
+    },
+    {
+      "id": "TASK-013",
+      "title": "Virtualized result list",
+      "description": "Create ui/src/components/ResultList.tsx: virtualized list (@tanstack/react-virtual) over ApiResult[], showing status glyph, relative time, cwd, command; selectable rows (arrow keys + click); requests the next page (offset) on scroll-near-end. Uses util/format.",
+      "type": "feature",
+      "effort": "L",
+      "priority": "P1",
+      "dependsOn": ["TASK-010", "TASK-011"],
+      "acceptanceCriteria": [
+        "Rendering 10,000 results keeps the DOM node count bounded (virtualized)",
+        "Scrolling near the end triggers a next-page (offset) fetch exactly once per boundary",
+        "Selecting a row (click or arrows+Enter) invokes the selection callback with the row id"
+      ],
+      "filesToModify": [],
+      "filesToCreate": ["ui/src/components/ResultList.tsx"],
+      "agent": "react-vite-tailwind-engineer"
+    },
+    {
+      "id": "TASK-014",
+      "title": "Detail pane (output viewer + copy + re-run)",
+      "description": "Create ui/src/components/DetailPane.tsx: given a selected id, fetch the full command, render a metadata header (cwd, branch, exit, time, duration, source) and a scrollable monospace output area; Copy command (navigator.clipboard) and Re-run (api.rerun(id) then show 'queued; quit bsc ui to run it'). Uses util/format.",
+      "type": "feature",
+      "effort": "M",
+      "priority": "P1",
+      "dependsOn": ["TASK-010", "TASK-011"],
+      "acceptanceCriteria": [
+        "Selecting a command loads and shows its full output in a scrollable area",
+        "Copy puts the command on the clipboard; a command with no output shows '(no output captured)'",
+        "Re-run calls the rerun endpoint and shows the queued confirmation; it does NOT execute in browser/server"
+      ],
+      "filesToModify": [],
+      "filesToCreate": ["ui/src/components/DetailPane.tsx"],
+      "agent": "react-vite-tailwind-engineer"
+    },
+    {
+      "id": "TASK-015",
+      "title": "App shell wiring",
+      "description": "Create ui/src/App.tsx: two-pane layout (list + detail) with a header showing getStats() totals; holds filter + selection state; wires SearchBar -> results query, ResultList -> selection, DetailPane -> detail; handles the unauthorized error with a clear message.",
+      "type": "feature",
+      "effort": "M",
+      "priority": "P1",
+      "dependsOn": ["TASK-009", "TASK-010", "TASK-012", "TASK-013", "TASK-014"],
+      "acceptanceCriteria": [
+        "Editing filters updates the list; selecting a row updates the detail pane",
+        "The header shows total command count from /api/stats",
+        "An unauthorized (bad/missing token) state renders a clear message, not a blank screen"
+      ],
+      "filesToModify": [],
+      "filesToCreate": ["ui/src/App.tsx"],
+      "agent": "react-vite-tailwind-engineer"
+    },
+    {
+      "id": "TASK-016",
+      "title": "Package the SPA build output",
+      "description": "Modify .gitignore to ignore dist-ui/ (a build artifact). The files[] array that ships dist-ui in npm is owned by TASK-008's package.json edit.",
+      "type": "infra",
+      "effort": "S",
+      "priority": "P3",
+      "dependsOn": [],
+      "acceptanceCriteria": [
+        "dist-ui/ is gitignored (not committed)",
+        "node_modules/dist ignores remain intact",
+        "No source under ui/ is ignored"
+      ],
+      "filesToModify": [".gitignore"],
+      "filesToCreate": [],
+      "agent": "general-purpose"
+    },
+    {
+      "id": "TASK-017",
+      "title": "API handler tests",
+      "description": "Create test/api.test.ts: against an in-memory store with seeded rows, assert handleSearch (filters + pagination total/offset), handleCommand (hit + 404), handleStats, and handleRerunIntent (queues, returns command, spawns nothing).",
+      "type": "test",
+      "effort": "M",
+      "priority": "P2",
+      "dependsOn": ["TASK-004"],
+      "acceptanceCriteria": [
+        "Search pagination returns correct total and disjoint pages",
+        "Missing-id command request yields 404",
+        "Rerun-intent pushes to the queue and the handler imports no child_process"
+      ],
+      "filesToModify": [],
+      "filesToCreate": ["test/api.test.ts"],
+      "agent": "nodejs-cli-senior-engineer"
+    },
+    {
+      "id": "TASK-018",
+      "title": "Server security integration test",
+      "description": "Create test/server.test.ts: start the real server, assert it listens on 127.0.0.1; /api/stats without token -> 401, with token -> 200; a static response carries the CSP header; the rerun endpoint records intent without executing (queue grows, no process spawned).",
+      "type": "test",
+      "effort": "M",
+      "priority": "P2",
+      "dependsOn": ["TASK-005"],
+      "acceptanceCriteria": [
+        "Unauthorized API request returns 401; authorized returns 200",
+        "The server host is loopback (127.0.0.1), never 0.0.0.0",
+        "A static response includes Content-Security-Policy: default-src 'self'"
+      ],
+      "filesToModify": [],
+      "filesToCreate": ["test/server.test.ts"],
+      "agent": "nodejs-cli-senior-engineer"
+    },
+    {
+      "id": "TASK-019",
+      "title": "Store pagination/stats tests",
+      "description": "Create test/store-pagination.test.ts: against :memory:, seed N rows and assert search offset paging is disjoint and ordered, countCommands matches filtered totals, and getStats reports correct totals/first/last including the empty-store edge case.",
+      "type": "test",
+      "effort": "S",
+      "priority": "P2",
+      "dependsOn": ["TASK-002"],
+      "acceptanceCriteria": [
+        "Page 1 (offset 0) and page 2 (offset=limit) share no rows",
+        "countCommands with a filter equals the number of matching rows",
+        "getStats on an empty store returns zeros/nulls without throwing"
+      ],
+      "filesToModify": [],
+      "filesToCreate": ["test/store-pagination.test.ts"],
+      "agent": "nodejs-cli-senior-engineer"
+    },
+    {
+      "id": "TASK-020",
+      "title": "README — bsc ui + privacy guarantees",
+      "description": "Modify README.md: document bsc ui (quickstart, --no-open, the eval \"$(bsc ui)\" re-run idiom) and a prominent note on the loopback-only / one-time-token / no-egress / no-server-exec guarantees, plus that the SPA ships pre-built.",
+      "type": "docs",
+      "effort": "S",
+      "priority": "P3",
+      "dependsOn": ["TASK-007", "TASK-015"],
+      "acceptanceCriteria": [
+        "Documents launching, the token URL, and --no-open",
+        "States the four guarantees: 127.0.0.1-only, token-gated, no external egress (CSP), no server-side execution",
+        "Explains the eval \"$(bsc ui)\" re-run flow accurately"
+      ],
+      "filesToModify": ["README.md"],
+      "filesToCreate": [],
+      "agent": "general-purpose"
+    }
+  ],
+  "dependencies": {
+    "TASK-001": [],
+    "TASK-002": [],
+    "TASK-003": [],
+    "TASK-004": ["TASK-001", "TASK-002"],
+    "TASK-005": ["TASK-003", "TASK-004"],
+    "TASK-006": ["TASK-005"],
+    "TASK-007": ["TASK-006"],
+    "TASK-008": [],
+    "TASK-009": ["TASK-008"],
+    "TASK-010": ["TASK-001", "TASK-008"],
+    "TASK-011": ["TASK-008"],
+    "TASK-012": ["TASK-010"],
+    "TASK-013": ["TASK-010", "TASK-011"],
+    "TASK-014": ["TASK-010", "TASK-011"],
+    "TASK-015": ["TASK-009", "TASK-010", "TASK-012", "TASK-013", "TASK-014"],
+    "TASK-016": [],
+    "TASK-017": ["TASK-004"],
+    "TASK-018": ["TASK-005"],
+    "TASK-019": ["TASK-002"],
+    "TASK-020": ["TASK-007", "TASK-015"]
+  }
+}

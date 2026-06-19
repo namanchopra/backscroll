@@ -5,8 +5,8 @@
  * runtime imports so they can be imported anywhere without side effects.
  */
 
-/** Where a command record came from. */
-export type CommandSource = 'pty' | 'hook';
+/** Where a command record came from: PTY recording, live shell hook, or imported history. */
+export type CommandSource = 'pty' | 'hook' | 'history';
 
 /** One `bsc rec` recording session. */
 export interface SessionRecord {
@@ -82,6 +82,8 @@ export interface SearchFilters {
   until?: number;
   /** max rows to return */
   limit?: number;
+  /** rows to skip before returning results (default 0) */
+  offset?: number;
 }
 
 /** A search hit. */

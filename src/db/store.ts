@@ -147,11 +147,23 @@ export class Store {
     return tx(input);
   }
 
-  search(filters: SearchFilters): SearchResult[] {
-    const limit = filters.limit && filters.limit > 0 ? filters.limit : 50;
+  /**
+   * Build the shared FROM / WHERE / ORDER / rank fragments and bound params for
+   * a set of filters. Used by both search() and countCommands() so their
+   * matching semantics (cwd prefix, successOnly, since/until, FTS MATCH when
+   * the query is non-empty) can never drift apart.
+   */
+  private buildQueryParts(filters: SearchFilters): {
+    tokens: string[];
+    from: string;
+    where: string;
+    order: string;
+    rankSel: string;
+    params: Record<string, unknown>;
+  } {
     const tokens = filters.query.match(/\S+/g) ?? [];
     const conds: string[] = [];
-    const params: Record<string, unknown> = { limit };
+    const params: Record<string, unknown> = {};
 
     let from: string;
     let order: string;
@@ -187,9 +199,19 @@ export class Store {
     }
 
     const where = conds.length ? `WHERE ${conds.join(' AND ')}` : '';
+    return { tokens, from, where, order, rankSel, params };
+  }
+
+  search(filters: SearchFilters): SearchResult[] {
+    const limit = filters.limit && filters.limit > 0 ? filters.limit : 50;
+    const offset = filters.offset && filters.offset > 0 ? filters.offset : 0;
+    const { tokens, from, where, order, rankSel, params } = this.buildQueryParts(filters);
+    params.limit = limit;
+    params.offset = offset;
+
     const sql = `SELECT c.id, c.session_id, c.command, c.cwd, c.git_branch, c.exit_code,
                         c.started_at, c.duration_ms, c.source, o.data AS output ${rankSel}
-                 ${from} ${where} ${order} LIMIT @limit`;
+                 ${from} ${where} ${order} LIMIT @limit OFFSET @offset`;
 
     const rows = this.db.prepare(sql).all(params) as Array<CommandRow & { rank: number }>;
     return rows.map((r) => ({
@@ -204,6 +226,42 @@ export class Store {
       snippet: makeSnippet(r.output, tokens),
       rank: r.rank,
     }));
+  }
+
+  /**
+   * Count rows matching the same WHERE/MATCH logic as search(), ignoring
+   * limit/offset. Useful for pagination ("X of N results").
+   */
+  countCommands(filters: SearchFilters): number {
+    const { from, where, params } = this.buildQueryParts(filters);
+    const sql = `SELECT count(*) AS n ${from} ${where}`;
+    const row = this.db.prepare(sql).get(params) as { n: number };
+    return row.n;
+  }
+
+  /**
+   * Aggregate store statistics: total command count, counts grouped by source,
+   * and the earliest/latest started_at. Empty store yields total 0, an empty
+   * bySource map, and null first/last timestamps.
+   */
+  getStats(): { total: number; bySource: Record<string, number>; firstAt: number | null; lastAt: number | null } {
+    const totalRow = this.db.prepare(`SELECT count(*) AS n FROM commands`).get() as { n: number };
+    const sourceRows = this.db
+      .prepare(`SELECT source, count(*) AS n FROM commands GROUP BY source`)
+      .all() as Array<{ source: string; n: number }>;
+    const rangeRow = this.db
+      .prepare(`SELECT min(started_at) AS firstAt, max(started_at) AS lastAt FROM commands`)
+      .get() as { firstAt: number | null; lastAt: number | null };
+
+    const bySource: Record<string, number> = {};
+    for (const r of sourceRows) bySource[r.source] = r.n;
+
+    return {
+      total: totalRow.n,
+      bySource,
+      firstAt: rangeRow.firstAt ?? null,
+      lastAt: rangeRow.lastAt ?? null,
+    };
   }
 
   getCommandById(id: number): CommandRecord | null {
@@ -226,5 +284,17 @@ export class Store {
       )
       .all(limit) as CommandRow[];
     return rows.map(toRecord);
+  }
+
+  /**
+   * Keys (`<started_at> <command>`) of already-imported history rows, so
+   * `bsc import` is idempotent. Must use the SAME separator as import.ts.
+   * Commands are the stored (redacted) form.
+   */
+  existingHistoryKeys(): Set<string> {
+    const rows = this.db
+      .prepare(`SELECT started_at, command FROM commands WHERE source = 'history'`)
+      .all() as Array<{ started_at: number; command: string }>;
+    return new Set(rows.map((r) => `${r.started_at} ${r.command}`));
   }
 }

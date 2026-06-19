@@ -1,5 +1,7 @@
 node_modules/
 dist/
+# SPA build output — rebuilt by `npm run build`, shipped via npm `files`, not committed
+dist-ui/
 *.tsbuildinfo
 
 # Local data store — must never be committed
