@@ -1,8 +1,33 @@
 {
-  "name": "backscroll",
+  "name": "backscroll-cli",
   "version": "0.1.0",
   "description": "A time machine for your terminal — records every command AND its output into a local, searchable store.",
   "license": "MIT",
+  "author": "namanchopra",
+  "homepage": "https://github.com/namanchopra/backscroll#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/namanchopra/backscroll.git"
+  },
+  "bugs": {
+    "url": "https://github.com/namanchopra/backscroll/issues"
+  },
+  "keywords": [
+    "cli",
+    "terminal",
+    "shell",
+    "history",
+    "command-history",
+    "scrollback",
+    "output",
+    "zsh",
+    "sqlite",
+    "fts5",
+    "recorder"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
   "type": "commonjs",
   "bin": {
     "bsc": "dist/cli.js"
@@ -16,6 +41,7 @@
     "node": ">=20"
   },
   "scripts": {
+    "prepublishOnly": "npm run build",
     "postinstall": "node scripts/postinstall.js",
     "build": "tsc -p tsconfig.json && node -e \"require('fs').copyFileSync('src/db/schema.sql','dist/db/schema.sql')\" && npm run build:ui",
     "dev": "tsc -w -p tsconfig.json",
