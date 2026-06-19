@@ -76,20 +76,41 @@ Backscroll captures in **two cleanly separated layers**.
 
 ## Quickstart
 
-Backscroll isn't published to npm yet, so install it by building from source. Requires **Node.js 20+** (native deps `node-pty` and `better-sqlite3` build on install).
+### 1. Install
 
 ```sh
-git clone https://github.com/your-org/backscroll.git
+npm install -g backscroll-cli
+```
+
+Requires **Node.js 20+** and **zsh** (macOS/Linux). The native deps (`node-pty`, `better-sqlite3`) install via prebuilt binaries — no compiler needed in the common case. The command is `bsc`.
+
+<details>
+<summary>Or build from source</summary>
+
+```sh
+git clone https://github.com/namanchopra/backscroll.git
 cd backscroll
 npm install
 npm run build
 npm link        # puts `bsc` on your PATH
 ```
 
-Wire up the always-on metadata hooks by adding this to your `~/.zshrc`:
+</details>
+
+### 2. Turn on recording
+
+Add this to your `~/.zshrc` to capture every command **and its output**, automatically, in every new terminal:
 
 ```sh
-eval "$(bsc init zsh)"
+eval "$(bsc init zsh --auto-record)"
+```
+
+Open a new terminal for it to take effect. (Prefer lightweight, metadata-only capture? Use `eval "$(bsc init zsh)"` instead, and run `bsc rec` when you want a session with output.)
+
+### 3. Bring your past with you (optional)
+
+```sh
+bsc import        # backfills ~/.zsh_history and ~/.bash_history (redacted, idempotent)
 ```
 
 Open a new shell so the hooks load, then start a recording session and run a few commands:
