@@ -8,8 +8,11 @@
 
 import type {
   ApiCommandDetail,
+  ApiConfig,
   ApiSearchResponse,
   ApiStats,
+  ApiStatus,
+  ImportResult,
   RerunResponse,
   SearchQuery,
 } from './api-types';
@@ -99,5 +102,53 @@ export function rerun(id: number): Promise<RerunResponse> {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ id }),
+  });
+}
+
+/** Fetch the recorder + store status (pause state, paths, version, total). */
+export function getStatus(): Promise<ApiStatus> {
+  return request<ApiStatus>('/api/status');
+}
+
+/**
+ * Pause or resume recording. The server only toggles a marker file; it never
+ * spawns a process. Returns the server-confirmed pause state.
+ */
+export function setPaused(paused: boolean): Promise<{ paused: boolean }> {
+  return request<{ paused: boolean }>('/api/pause', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ paused }),
+  });
+}
+
+/**
+ * Backfill shell history from the chosen sources. The browser may only supply
+ * the `zsh`/`bash` flags — there is no file path on the wire. Returns the
+ * import pass's result counts.
+ */
+export function runImport(opts: { zsh?: boolean; bash?: boolean }): Promise<ImportResult> {
+  return request<ImportResult>('/api/import', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(opts),
+  });
+}
+
+/** Fetch the current effective configuration. */
+export function getConfig(): Promise<ApiConfig> {
+  return request<ApiConfig>('/api/config');
+}
+
+/**
+ * Persist configuration. The server validates field types (400 on a bad type),
+ * merges over the current config, and writes a JSON file — no process spawned.
+ * Returns the merged, persisted config.
+ */
+export function saveConfig(config: ApiConfig): Promise<ApiConfig> {
+  return request<ApiConfig>('/api/config', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(config),
   });
 }

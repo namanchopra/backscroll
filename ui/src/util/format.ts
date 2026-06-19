@@ -124,3 +124,39 @@ export function statusGlyph(exitCode: number | null): string {
 
   return exitCode === 0 ? '✓' : '✗';
 }
+
+/**
+ * Bucket a timestamp into a coarse, human time group relative to `now`, for the
+ * timeline group headers in the result list. Buckets are mutually exclusive and
+ * ordered newest → oldest:
+ *
+ * - future timestamp → "Today" (clamped; treated as the most recent group).
+ * - same calendar-relative day (< 24h) → "Today".
+ * - previous day (< 48h) → "Yesterday".
+ * - within the last 7 days → "This week".
+ * - within the last ~4 weeks → "N weeks ago" (1–4).
+ * - within the last ~12 months → "N months ago" (1–11).
+ * - older → "Older".
+ */
+export function timeGroup(ts: number, now: number): string {
+  const diff = now - ts;
+
+  if (diff < MS_DAY) {
+    return 'Today';
+  }
+  if (diff < 2 * MS_DAY) {
+    return 'Yesterday';
+  }
+  if (diff < MS_WEEK) {
+    return 'This week';
+  }
+  if (diff < MS_MONTH) {
+    const weeks = Math.floor(diff / MS_WEEK);
+    return `${weeks} week${weeks === 1 ? '' : 's'} ago`;
+  }
+  if (diff < MS_YEAR) {
+    const months = Math.floor(diff / MS_MONTH);
+    return `${months} month${months === 1 ? '' : 's'} ago`;
+  }
+  return 'Older';
+}

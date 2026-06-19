@@ -6,7 +6,7 @@
  */
 import fs from 'fs';
 import { BackscrollConfig } from './types';
-import { configPath } from './paths';
+import { configPath, ensureDataDir } from './paths';
 
 export const DEFAULT_CONFIG: BackscrollConfig = {
   redactionEnabled: true,
@@ -41,4 +41,14 @@ export function loadConfig(file: string = configPath()): BackscrollConfig {
     );
     return { ...DEFAULT_CONFIG };
   }
+}
+
+/**
+ * Persist `config` as pretty JSON to disk. Ensures the (owner-only) data dir
+ * exists first, then writes the config file with 0600 permissions so captured
+ * settings stay private. Touches a JSON file only — never spawns a process.
+ */
+export function saveConfig(config: BackscrollConfig, file: string = configPath()): void {
+  ensureDataDir();
+  fs.writeFileSync(file, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
 }

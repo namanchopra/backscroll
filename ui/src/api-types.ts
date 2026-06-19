@@ -71,6 +71,37 @@ export interface RerunResponse {
   command: string;
 }
 
+/** Runtime status of the recorder + store, for the control UI. */
+export interface ApiStatus {
+  /** true when recording is globally paused (pause marker present) */
+  paused: boolean;
+  /** absolute path to the Backscroll data directory */
+  dataDir: string;
+  /** absolute path to the SQLite database file */
+  dbPath: string;
+  /** running bsc version */
+  version: string;
+  /** total recorded commands */
+  total: number;
+}
+
+/** User configuration as exposed over the wire (mirrors BackscrollConfig). */
+export interface ApiConfig {
+  redactionEnabled: boolean;
+  redactionExtraPatterns: string[];
+  excludeCommands: string[];
+  excludeDirs: string[];
+  maxOutputBytes: number;
+}
+
+/** Result counts from a history import pass. */
+export interface ImportResult {
+  imported: number;
+  skipped: number;
+  excluded: number;
+  filesRead: number;
+}
+
 /** Query parameters accepted by the /api/search endpoint. */
 export interface SearchQuery {
   q?: string;

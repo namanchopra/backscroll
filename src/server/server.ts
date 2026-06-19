@@ -13,7 +13,9 @@
  *    API call (Authorization: Bearer <t> or ?token=<t>). The comparison is
  *    constant-time to avoid leaking the token via timing.
  *  - This server NEVER spawns a process. The /api/rerun endpoint only records
- *    *intent* into an in-memory queue; there is no child_process import here.
+ *    *intent* into an in-memory queue; the control endpoints (status, pause,
+ *    import, config) touch a marker file, read history files, or write a JSON
+ *    config — never a shell. There is no child_process import here.
  *
  * Uses only Node built-ins (http, crypto, url) — no third-party dependencies.
  */
@@ -27,6 +29,11 @@ import {
   handleCommand,
   handleStats,
   handleRerunIntent,
+  handleStatus,
+  handlePause,
+  handleImport,
+  handleGetConfig,
+  handleSetConfig,
 } from './api';
 import { serveStatic } from './static';
 
@@ -104,6 +111,24 @@ function readBody(req: http.IncomingMessage): Promise<string> {
   });
 }
 
+/** Parsed-body outcome: an empty body parses to {} so flag-only POSTs are valid. */
+type JsonBody = { ok: true; value: unknown } | { ok: false };
+
+/**
+ * Read and JSON.parse the request body (bounded by MAX_BODY_BYTES). An empty
+ * body is treated as `{}`; malformed JSON yields { ok: false } so callers can
+ * return a 400 without leaking parse details.
+ */
+async function readJsonBody(req: http.IncomingMessage): Promise<JsonBody> {
+  const raw = await readBody(req);
+  try {
+    const value: unknown = raw.length > 0 ? JSON.parse(raw) : {};
+    return { ok: true, value };
+  } catch {
+    return { ok: false };
+  }
+}
+
 /**
  * Route and serve a single authenticated /api/* request. The token has already
  * been verified by the caller. Any handler throw becomes a 500 JSON reply.
@@ -135,17 +160,54 @@ async function handleApi(
       return;
     }
 
+    if (method === 'GET' && pathname === '/api/status') {
+      writeJson(res, handleStatus(store));
+      return;
+    }
+
+    if (method === 'GET' && pathname === '/api/config') {
+      writeJson(res, handleGetConfig());
+      return;
+    }
+
     if (method === 'POST' && pathname === '/api/rerun') {
-      const raw = await readBody(req);
-      let id: unknown;
-      try {
-        const parsed: unknown = raw.length > 0 ? JSON.parse(raw) : {};
-        id = (parsed as { id?: unknown }).id;
-      } catch {
+      const parsed = await readJsonBody(req);
+      if (!parsed.ok) {
         writeJson(res, { status: 400, json: { error: 'invalid JSON body' } });
         return;
       }
+      const id = (parsed.value as { id?: unknown }).id;
       writeJson(res, handleRerunIntent(store, String(id), rerunQueue));
+      return;
+    }
+
+    if (method === 'POST' && pathname === '/api/pause') {
+      const parsed = await readJsonBody(req);
+      if (!parsed.ok) {
+        writeJson(res, { status: 400, json: { error: 'invalid JSON body' } });
+        return;
+      }
+      writeJson(res, handlePause(parsed.value));
+      return;
+    }
+
+    if (method === 'POST' && pathname === '/api/import') {
+      const parsed = await readJsonBody(req);
+      if (!parsed.ok) {
+        writeJson(res, { status: 400, json: { error: 'invalid JSON body' } });
+        return;
+      }
+      writeJson(res, handleImport(parsed.value));
+      return;
+    }
+
+    if (method === 'POST' && pathname === '/api/config') {
+      const parsed = await readJsonBody(req);
+      if (!parsed.ok) {
+        writeJson(res, { status: 400, json: { error: 'invalid JSON body' } });
+        return;
+      }
+      writeJson(res, handleSetConfig(parsed.value));
       return;
     }
 

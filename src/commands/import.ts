@@ -22,6 +22,14 @@ export interface ImportOptions {
   file?: string;
 }
 
+/** Counts returned by a history import pass. */
+export interface ImportResult {
+  imported: number;
+  skipped: number;
+  excluded: number;
+  filesRead: number;
+}
+
 interface HistFile {
   kind: 'zsh' | 'bash';
   path: string;
@@ -47,7 +55,13 @@ function resolveFiles(opts: ImportOptions): HistFile[] {
   return files;
 }
 
-export function importCommand(opts: ImportOptions): number {
+/**
+ * Core history import: parse → redact → gate → insert → dedup. Returns the
+ * tallied counts and performs NO printing, so both the CLI command and the web
+ * API handler can reuse it. Files that don't exist are silently skipped (they
+ * just don't bump `filesRead`); never spawns a process.
+ */
+export function importHistory(opts: ImportOptions): ImportResult {
   const config = loadConfig();
   const store = new Store(getDb());
   const existing = store.existingHistoryKeys();
@@ -58,10 +72,7 @@ export function importCommand(opts: ImportOptions): number {
   let filesRead = 0;
 
   for (const hf of resolveFiles(opts)) {
-    if (!fs.existsSync(hf.path)) {
-      process.stderr.write(pc.dim(`  (no ${hf.path})\n`));
-      continue;
-    }
+    if (!fs.existsSync(hf.path)) continue;
     filesRead += 1;
     const content = fs.readFileSync(hf.path, 'utf8');
     const mtime = fileMtime(hf.path);
@@ -97,14 +108,26 @@ export function importCommand(opts: ImportOptions): number {
     }
   }
 
-  if (filesRead === 0) {
+  return { imported, skipped, excluded, filesRead };
+}
+
+export function importCommand(opts: ImportOptions): number {
+  // Note the files we *would* read, so we can warn about missing ones the same
+  // way the original CLI did — importHistory itself stays print-free.
+  for (const hf of resolveFiles(opts)) {
+    if (!fs.existsSync(hf.path)) process.stderr.write(pc.dim(`  (no ${hf.path})\n`));
+  }
+
+  const result = importHistory(opts);
+
+  if (result.filesRead === 0) {
     process.stderr.write(pc.yellow('bsc: no history files found to import.\n'));
     return 1;
   }
 
-  const parts = [`${pc.green('✓')} imported ${imported} commands`];
-  if (skipped) parts.push(`${skipped} already present`);
-  if (excluded) parts.push(`${excluded} excluded`);
+  const parts = [`${pc.green('✓')} imported ${result.imported} commands`];
+  if (result.skipped) parts.push(`${result.skipped} already present`);
+  if (result.excluded) parts.push(`${result.excluded} excluded`);
   process.stdout.write(`${parts.join(', ')}\n`);
   return 0;
 }
